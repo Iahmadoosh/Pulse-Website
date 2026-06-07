@@ -1,0 +1,8 @@
+{
+  "name": "AI HR Analytics",
+  "description": "HR application that uses analytical tools to assess and recommend decisions related to hiring, firing, and behavioral aspects using AI.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
