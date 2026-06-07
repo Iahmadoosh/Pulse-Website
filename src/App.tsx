@@ -611,8 +611,6 @@ export default function App() {
           <ProfileView
             user={user}
             logout={logout}
-            preset={preset}
-            onSetPreset={handleSetPreset}
             setup={setup}
             onUpdateSetup={(newSetup) => {
               if (user) {
@@ -1523,27 +1521,6 @@ export default function App() {
           </div>
 
           <div className="flex items-center gap-3">
-            <select
-              value={preset}
-              onChange={(e) => handleSetPreset(e.target.value as PresetName)}
-              className={`text-[10px] font-bold uppercase tracking-wider px-2.5 py-1.5 rounded-lg border focus:outline-none cursor-pointer ${
-                preset === "stark"
-                  ? "bg-white border-slate-200 text-slate-700"
-                  : preset === "cosmic"
-                    ? "bg-[#1E293B] border-slate-700 text-slate-200"
-                    : preset === "mist"
-                      ? "bg-white border-[#DDE3EE] text-[#1E293B]"
-                      : "bg-[#FFFDF9] border-2 border-[#0E0E0F] text-[#0E0E0F]"
-              }`}
-              aria-label="Select website theme"
-              id="header-theme-select"
-            >
-              <option value="stark">Stark</option>
-              <option value="editorial">Editorial</option>
-              <option value="cosmic">Cosmic</option>
-              <option value="mist">Mist</option>
-            </select>
-
             {/* Config settings button */}
             <button
               onClick={() => setActiveTab("profile")}
