@@ -5,7 +5,6 @@ import { GoogleGenAI, Type } from "@google/genai";
 import dotenv from "dotenv";
 import cron from "node-cron";
 import axios from "axios";
-import * as cheerio from "cheerio";
 
 dotenv.config();
 
@@ -18,8 +17,46 @@ const ai = new GoogleGenAI({
   },
 });
 
-// ─── MOCK DATABASES FOR SCRAPER ──────────────────────────────────────────────
-// Replace these with your actual database calls (Firebase, MongoDB, etc.) later
+// ─── SCRAPER ENGINE ──────────────────────────────────────────────────────────
+type TrendSource = "reddit" | "bluesky" | "hackernews" | "gdelt";
+
+type ChannelLabel =
+  | "Community Forums (Reddit)"
+  | "Retail Competitors"
+  | "Social Media (Instagram/X)"
+  | "TikTok Hashtags";
+
+interface RawMention {
+  source: TrendSource;
+  title: string;
+  url: string;
+  createdAt: string;
+  engagement: number;
+  sentiment: "Positive" | "Neutral" | "Negative";
+}
+
+interface PlatformInsight {
+  source: TrendSource;
+  positive: number;
+  neutral: number;
+  negative: number;
+  total: number;
+  positiveRate: number;
+}
+
+interface TrendResult {
+  id: string;
+  topic: string;
+  volume: string;
+  change: string;
+  sentiment: "Positive" | "Neutral" | "Negative";
+  sources: TrendSource[];
+  sampleMentions: RawMention[];
+  platformInsights: PlatformInsight[];
+  relatedHashtags: string[];
+  confidenceScore: number;
+}
+
 const mockScraperSettingsDB = [
   {
     clientId: "user_01",
@@ -33,63 +70,491 @@ const mockScraperSettingsDB = [
   },
 ];
 
-const scrapedTrendsDB: any[] = []; // Stores the results of the nightly scrape
+const scrapedTrendsDB: any[] = [];
 
-// ─── SCRAPER ENGINE ──────────────────────────────────────────────────────────
-async function scrapeForKeyword(keyword: string) {
-  try {
-    // Searching HackerNews as a safe, public testing ground
-    const searchUrl = `https://news.ycombinator.com/`;
+const POSITIVE_WORDS = [
+  "love",
+  "great",
+  "best",
+  "amazing",
+  "excellent",
+  "recommend",
+  "quality",
+  "helpful",
+  "growth",
+  "win",
+  "excited",
+  "improved",
+  "success",
+];
 
-    const { data: html } = await axios.get(searchUrl, {
-      headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" },
-    });
+const NEGATIVE_WORDS = [
+  "bad",
+  "worst",
+  "hate",
+  "issue",
+  "problem",
+  "bug",
+  "decline",
+  "drop",
+  "complaint",
+  "frustrating",
+  "broken",
+  "fail",
+  "scam",
+];
 
-    const $ = cheerio.load(html);
-    const findings: string[] = [];
+function normalizeKeywords(input: unknown): string[] {
+  if (Array.isArray(input)) {
+    return input
+      .map((k) => String(k).trim())
+      .filter(Boolean)
+      .slice(0, 15);
+  }
 
-    $(".titleline > a").each((index, element) => {
-      const text = $(element).text().toLowerCase();
-      if (text.includes(keyword.toLowerCase())) {
-        findings.push(text);
-      }
-    });
+  if (typeof input === "string") {
+    return input
+      .split(",")
+      .map((k) => k.trim())
+      .filter(Boolean)
+      .slice(0, 15);
+  }
 
-    return findings;
-  } catch (error) {
-    console.error(`Error scraping for ${keyword}:`, error);
-    return [];
+  return [];
+}
+
+function resolveSources(infoTypes: unknown): TrendSource[] {
+  const channels = Array.isArray(infoTypes)
+    ? infoTypes.map((x) => String(x))
+    : [];
+
+  const sources = new Set<TrendSource>();
+
+  if (channels.includes("Community Forums (Reddit)" as ChannelLabel)) {
+    sources.add("reddit");
+    sources.add("hackernews");
+  }
+
+  if (channels.includes("Social Media (Instagram/X)" as ChannelLabel)) {
+    sources.add("reddit");
+    sources.add("bluesky");
+  }
+
+  if (channels.includes("TikTok Hashtags" as ChannelLabel)) {
+    sources.add("gdelt");
+    sources.add("bluesky");
+  }
+
+  if (channels.includes("Retail Competitors" as ChannelLabel)) {
+    sources.add("gdelt");
+  }
+
+  if (sources.size === 0) {
+    sources.add("reddit");
+    sources.add("bluesky");
+    sources.add("hackernews");
+    sources.add("gdelt");
+  }
+
+  return Array.from(sources);
+}
+
+function scoreSentiment(text: string): number {
+  const normalized = text.toLowerCase();
+  let score = 0;
+
+  for (const term of POSITIVE_WORDS) {
+    if (normalized.includes(term)) score += 1;
+  }
+
+  for (const term of NEGATIVE_WORDS) {
+    if (normalized.includes(term)) score -= 1;
+  }
+
+  return score;
+}
+
+function classifySentiment(score: number): "Positive" | "Neutral" | "Negative" {
+  if (score > 0) return "Positive";
+  if (score < 0) return "Negative";
+  return "Neutral";
+}
+
+function formatTopic(keyword: string): string {
+  if (keyword.startsWith("#")) return keyword;
+  const compact = keyword.replace(/\s+/g, "");
+  return `#${compact.charAt(0).toUpperCase()}${compact.slice(1)}`;
+}
+
+function toIso(value: unknown): string {
+  const date = value ? new Date(value as any) : new Date();
+  if (Number.isNaN(date.getTime())) return new Date().toISOString();
+  return date.toISOString();
+}
+
+function computeMomentum(mentions: RawMention[]): number {
+  const now = Date.now();
+  const twoDays = 2 * 24 * 60 * 60 * 1000;
+  const recent = mentions.filter(
+    (m) => now - new Date(m.createdAt).getTime() <= twoDays,
+  ).length;
+  const older = Math.max(mentions.length - recent, 0);
+
+  const delta = ((recent + 1) / (older + 1) - 1) * 100;
+  return Math.max(-95, Math.min(180, Math.round(delta)));
+}
+
+function extractRelatedHashtags(
+  keyword: string,
+  mentions: RawMention[],
+): string[] {
+  const fromText = new Set<string>();
+  const stopWords = new Set([
+    "the",
+    "and",
+    "with",
+    "from",
+    "this",
+    "that",
+    "your",
+    "have",
+    "about",
+    "into",
+    "for",
+    "you",
+    "new",
+    "best",
+  ]);
+
+  for (const mention of mentions) {
+    const explicitTags = mention.title.match(/#[A-Za-z0-9_]+/g) || [];
+    for (const tag of explicitTags) {
+      fromText.add(tag);
+    }
+
+    const words = mention.title
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/g, " ")
+      .split(/\s+/)
+      .filter(Boolean)
+      .filter((w) => w.length >= 5 && !stopWords.has(w));
+
+    for (const word of words) {
+      fromText.add(`#${word}`);
+      if (fromText.size >= 12) break;
+    }
+    if (fromText.size >= 12) break;
+  }
+
+  const keywordTag = formatTopic(keyword);
+  return [
+    keywordTag,
+    ...Array.from(fromText).filter((t) => t !== keywordTag),
+  ].slice(0, 8);
+}
+
+async function fetchRedditMentions(
+  keyword: string,
+  limit: number,
+): Promise<RawMention[]> {
+  const { data } = await axios.get("https://www.reddit.com/search.json", {
+    params: { q: keyword, sort: "new", t: "week", limit },
+    headers: { "User-Agent": "PulseTrendScanner/1.0" },
+    timeout: 12000,
+  });
+
+  const children = data?.data?.children || [];
+  return children
+    .map((entry: any) => {
+      const d = entry?.data;
+      return {
+        source: "reddit" as const,
+        title: String(d?.title || "Untitled Reddit post"),
+        url: d?.permalink
+          ? `https://www.reddit.com${d.permalink}`
+          : "https://www.reddit.com",
+        createdAt: toIso((d?.created_utc || 0) * 1000),
+        engagement: Number(d?.score || 0) + Number(d?.num_comments || 0),
+        sentiment: classifySentiment(scoreSentiment(String(d?.title || ""))),
+      };
+    })
+    .filter((m: RawMention) => m.title);
+}
+
+async function fetchBlueskyMentions(
+  keyword: string,
+  limit: number,
+): Promise<RawMention[]> {
+  const { data } = await axios.get(
+    "https://public.api.bsky.app/xrpc/app.bsky.feed.searchPosts",
+    {
+      params: { q: keyword, limit: Math.min(limit, 50) },
+      timeout: 12000,
+    },
+  );
+
+  const posts = data?.posts || [];
+  return posts
+    .map((post: any) => {
+      const uri = String(post?.uri || "");
+      const postId = uri.split("/").pop() || "";
+      const handle = String(post?.author?.handle || "");
+      const profileLink =
+        handle && postId
+          ? `https://bsky.app/profile/${handle}/post/${postId}`
+          : "https://bsky.app";
+
+      return {
+        source: "bluesky" as const,
+        title: String(post?.record?.text || "Bluesky post"),
+        url: profileLink,
+        createdAt: toIso(post?.indexedAt),
+        engagement:
+          Number(post?.likeCount || 0) +
+          Number(post?.repostCount || 0) +
+          Number(post?.replyCount || 0),
+        sentiment: classifySentiment(
+          scoreSentiment(String(post?.record?.text || "")),
+        ),
+      };
+    })
+    .filter((m: RawMention) => m.title);
+}
+
+async function fetchHnMentions(
+  keyword: string,
+  limit: number,
+): Promise<RawMention[]> {
+  const { data } = await axios.get("https://hn.algolia.com/api/v1/search", {
+    params: {
+      query: keyword,
+      tags: "story",
+      hitsPerPage: Math.min(limit, 50),
+    },
+    timeout: 12000,
+  });
+
+  const hits = data?.hits || [];
+  return hits
+    .map((hit: any) => ({
+      source: "hackernews" as const,
+      title: String(hit?.title || hit?.story_title || "HN story"),
+      url:
+        hit?.url ||
+        `https://news.ycombinator.com/item?id=${String(hit?.objectID || "")}`,
+      createdAt: toIso(hit?.created_at),
+      engagement: Number(hit?.points || 0) + Number(hit?.num_comments || 0),
+      sentiment: classifySentiment(
+        scoreSentiment(String(hit?.title || hit?.story_title || "")),
+      ),
+    }))
+    .filter((m: RawMention) => m.title);
+}
+
+async function fetchGdeltMentions(
+  keyword: string,
+  limit: number,
+): Promise<RawMention[]> {
+  const query = `"${keyword}"`;
+  const { data } = await axios.get(
+    "https://api.gdeltproject.org/api/v2/doc/doc",
+    {
+      params: {
+        query,
+        mode: "ArtList",
+        format: "json",
+        maxrecords: Math.min(limit, 50),
+        sort: "DateDesc",
+      },
+      timeout: 12000,
+    },
+  );
+
+  const articles = data?.articles || [];
+  return articles
+    .map((article: any) => ({
+      source: "gdelt" as const,
+      title: String(article?.title || "Web mention"),
+      url: String(article?.url || "https://www.gdeltproject.org"),
+      createdAt: toIso(article?.seendate),
+      engagement: 1,
+      sentiment: classifySentiment(
+        scoreSentiment(String(article?.title || "")),
+      ),
+    }))
+    .filter((m: RawMention) => m.title);
+}
+
+async function fetchMentionsBySource(
+  source: TrendSource,
+  keyword: string,
+  limit: number,
+): Promise<RawMention[]> {
+  switch (source) {
+    case "reddit":
+      return fetchRedditMentions(keyword, limit);
+    case "bluesky":
+      return fetchBlueskyMentions(keyword, limit);
+    case "hackernews":
+      return fetchHnMentions(keyword, limit);
+    case "gdelt":
+      return fetchGdeltMentions(keyword, limit);
+    default:
+      return [];
   }
 }
 
-async function executeTrendScrape() {
-  console.log("🔍 Starting trend scrape...");
-  const results = [];
+function buildTrend(keyword: string, mentions: RawMention[]): TrendResult {
+  const sentimentScore = mentions.reduce(
+    (acc, m) => acc + scoreSentiment(m.title),
+    0,
+  );
+  const momentum = computeMomentum(mentions);
 
-  for (const client of mockScraperSettingsDB) {
-    console.log(`Scanning for Client: ${client.businessName}`);
-    let dailyResults = [];
+  const sources = Array.from(new Set(mentions.map((m) => m.source)));
+  const platformRollup = new Map<TrendSource, PlatformInsight>();
 
-    for (const word of client.keywords) {
-      const hits = await scrapeForKeyword(word);
-      if (hits.length > 0) {
-        dailyResults.push({ keyword: word, mentions: hits });
+  for (const mention of mentions) {
+    if (!platformRollup.has(mention.source)) {
+      platformRollup.set(mention.source, {
+        source: mention.source,
+        positive: 0,
+        neutral: 0,
+        negative: 0,
+        total: 0,
+        positiveRate: 0,
+      });
+    }
+
+    const stat = platformRollup.get(mention.source)!;
+    stat.total += 1;
+    if (mention.sentiment === "Positive") stat.positive += 1;
+    else if (mention.sentiment === "Negative") stat.negative += 1;
+    else stat.neutral += 1;
+  }
+
+  const platformInsights = Array.from(platformRollup.values())
+    .map((row) => ({
+      ...row,
+      positiveRate: row.total
+        ? Math.round((row.positive / row.total) * 100)
+        : 0,
+    }))
+    .sort((a, b) => b.positiveRate - a.positiveRate);
+
+  const confidenceScore = Math.min(
+    100,
+    Math.round(sources.length * 22 + Math.min(mentions.length, 30) * 2),
+  );
+
+  const sortedMentions = mentions
+    .sort((a, b) => {
+      const timeDiff =
+        new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+      if (timeDiff !== 0) return timeDiff;
+      return b.engagement - a.engagement;
+    })
+    .slice(0, 8);
+
+  return {
+    id: `t-live-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    topic: formatTopic(keyword),
+    volume: mentions.length.toLocaleString(),
+    change: `${momentum >= 0 ? "+" : ""}${momentum}%`,
+    sentiment: classifySentiment(sentimentScore),
+    sources,
+    sampleMentions: sortedMentions,
+    platformInsights,
+    relatedHashtags: extractRelatedHashtags(keyword, mentions),
+    confidenceScore,
+  };
+}
+
+async function scanKeywords(
+  keywordsInput: unknown,
+  infoTypesInput: unknown,
+  maxPerSource = 20,
+) {
+  const keywords = normalizeKeywords(keywordsInput);
+  const sources = resolveSources(infoTypesInput);
+  const logs: string[] = [];
+  const trends: TrendResult[] = [];
+
+  logs.push(
+    `[INIT] Booting scan pipeline for ${keywords.length} keyword(s) across ${sources.length} source adapters...`,
+  );
+
+  for (const keyword of keywords) {
+    logs.push(`[SCAN] Keyword '${keyword}': starting multi-source lookup...`);
+    const allMentions: RawMention[] = [];
+
+    for (const source of sources) {
+      try {
+        const mentions = await fetchMentionsBySource(
+          source,
+          keyword,
+          maxPerSource,
+        );
+        allMentions.push(...mentions);
+        logs.push(
+          `[OK] ${source}: ${mentions.length} mention(s) collected for '${keyword}'.`,
+        );
+      } catch (error: any) {
+        logs.push(
+          `[WARN] ${source}: failed for '${keyword}' (${error?.message || "unknown error"}).`,
+        );
       }
     }
 
-    if (dailyResults.length > 0) {
-      const newRecord = {
-        clientId: client.clientId,
-        businessName: client.businessName,
-        date: new Date().toISOString(),
-        trends: dailyResults,
-      };
-      scrapedTrendsDB.push(newRecord);
-      results.push(newRecord);
-      console.log(`✅ Saved new trends for ${client.businessName}`);
+    const deduped = allMentions.filter(
+      (item, idx, arr) =>
+        arr.findIndex(
+          (x) =>
+            x.url.toLowerCase() === item.url.toLowerCase() ||
+            x.title.toLowerCase() === item.title.toLowerCase(),
+        ) === idx,
+    );
+
+    if (deduped.length > 0) {
+      trends.push(buildTrend(keyword, deduped));
+      logs.push(
+        `[AGGREGATE] '${keyword}' summarized with ${deduped.length} deduplicated mention(s).`,
+      );
+    } else {
+      logs.push(`[EMPTY] No matching mentions found for '${keyword}'.`);
     }
   }
-  console.log("🏁 Scrape complete.");
+
+  logs.push(
+    `[DONE] Scan complete. ${trends.length} trend record(s) generated.`,
+  );
+
+  return { trends, logs, sources };
+}
+
+async function executeTrendScrape() {
+  console.log("Starting nightly trend scrape...");
+  const results = [];
+
+  for (const client of mockScraperSettingsDB) {
+    const { trends } = await scanKeywords(
+      client.keywords,
+      ["Community Forums (Reddit)", "Social Media (Instagram/X)"],
+      12,
+    );
+
+    const newRecord = {
+      clientId: client.clientId,
+      businessName: client.businessName,
+      date: new Date().toISOString(),
+      trends,
+    };
+
+    scrapedTrendsDB.push(newRecord);
+    results.push(newRecord);
+  }
+
+  console.log("Nightly trend scrape complete.");
   return results;
 }
 
@@ -151,6 +616,35 @@ async function startServer() {
   app.get("/api/trends", (req, res) => {
     // Allows your frontend to fetch the data the scraper gathered
     res.json(scrapedTrendsDB);
+  });
+
+  app.post("/api/social-trends/scrape", async (req, res) => {
+    try {
+      const keywords = normalizeKeywords(req.body?.keywords);
+      const infoTypes = Array.isArray(req.body?.infoTypes)
+        ? req.body.infoTypes
+        : [];
+
+      if (!keywords.length) {
+        return res
+          .status(400)
+          .json({ error: "Please provide at least one keyword." });
+      }
+
+      const { trends, logs, sources } = await scanKeywords(keywords, infoTypes);
+
+      res.json({
+        trends,
+        logs,
+        sources,
+        generatedAt: new Date().toISOString(),
+      });
+    } catch (error: any) {
+      console.error("Social trends scrape failed:", error);
+      res.status(500).json({
+        error: error?.message || "Failed to scrape social trends.",
+      });
+    }
   });
 
   // --- EXISTING HR API ROUTES ---

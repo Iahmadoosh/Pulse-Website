@@ -24,6 +24,9 @@ import {
   Terminal,
   Search,
   Settings,
+  ChevronDown,
+  ChevronUp,
+  ExternalLink,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 
@@ -197,6 +200,34 @@ const MOCK_TRENDS = [
     sentiment: "Neutral",
   },
 ];
+
+type TrendSentiment = "Positive" | "Neutral" | "Negative";
+
+interface TrendItem {
+  id: string;
+  topic: string;
+  volume: string;
+  change: string;
+  sentiment: TrendSentiment;
+  confidenceScore?: number;
+  platformInsights?: {
+    source: string;
+    positive: number;
+    neutral: number;
+    negative: number;
+    total: number;
+    positiveRate: number;
+  }[];
+  relatedHashtags?: string[];
+  sampleMentions?: {
+    source: string;
+    title: string;
+    url: string;
+    createdAt: string;
+    engagement: number;
+    sentiment: TrendSentiment;
+  }[];
+}
 
 interface Campaign {
   id: number;
@@ -571,14 +602,19 @@ function SocialTrendsTab() {
   const [copied, setCopied] = useState(false);
 
   // Scraper and Alerts specific states
-  const [trends, setTrends] = useState(() => {
+  const [trends, setTrends] = useState<TrendItem[]>(() => {
     try {
       const saved = localStorage.getItem("pulse_trends_list");
-      if (saved) return JSON.parse(saved);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) {
+          return parsed as TrendItem[];
+        }
+      }
     } catch (e) {
       console.error(e);
     }
-    return MOCK_TRENDS;
+    return MOCK_TRENDS as TrendItem[];
   });
 
   const [scrapeConfig, setScrapeConfig] = useState(() => {
@@ -601,6 +637,25 @@ function SocialTrendsTab() {
   const [scrapingProgress, setScrapingProgress] = useState(0);
   const [showScraperConsole, setShowScraperConsole] = useState(false);
   const [isSetupOpen, setIsSetupOpen] = useState(false);
+  const [expandedTrendId, setExpandedTrendId] = useState<string | null>(null);
+  const [sourceFilterByTrend, setSourceFilterByTrend] = useState<
+    Record<string, string>
+  >({});
+
+  const sourceName = (source: string) => {
+    switch (source) {
+      case "reddit":
+        return "Reddit";
+      case "bluesky":
+        return "Bluesky";
+      case "hackernews":
+        return "Hacker News";
+      case "gdelt":
+        return "Web Mentions";
+      default:
+        return source;
+    }
+  };
 
   // Form temporary inputs
   const [tempKeywords, setTempKeywords] = useState("");
@@ -639,123 +694,126 @@ function SocialTrendsTab() {
     }
   };
 
-  const runScraperSimulation = () => {
+  const runScraperSimulation = async () => {
     setIsScraping(true);
     setShowScraperConsole(true);
     setScrapingProgress(0);
-    setScraperLogs([]);
+    setScraperLogs([
+      "[BOOT] Initializing trend scanner client...",
+      "[AUTH] Preparing outbound requests with rotating headers...",
+      `[QUERY] Keywords queued: ${scrapeConfig.keywords}`,
+    ]);
 
-    const logMessages = [
-      {
-        t: 200,
-        m: "🚀 [LAUNCH] Initializing web crawler node on cloud sandbox...",
-      },
-      {
-        t: 600,
-        m: "🔑 [AUTH] Establishing encrypted connection sessions & rotating user-agents...",
-      },
-      {
-        t: 1200,
-        m: `🔎 [CRAWL] Scanning community r/ceramics and retail catalogs for keywords: "${scrapeConfig.keywords}"`,
-      },
-      {
-        t: 1800,
-        m: `📸 [CRAWL] Indexing matching public Instagram posts, TikTok metadata, and X trends...`,
-      },
-      {
-        t: 2400,
-        m: `⚙️ [FILTER] Filtering matching data across channel matrices (${scrapeConfig.infoTypes.join(", ")})...`,
-      },
-      {
-        t: 3000,
-        m: "📈 [METRICS] Processing NLP sentiment analysis scores and 30-day projection trends...",
-      },
-      {
-        t: 3500,
-        m: "💾 [ERP] Injecting scraped structured intelligence directly to secure ERP buffers...",
-      },
-      {
-        t: 4000,
-        m: "🏆 [SUCCESS] Scrape finished! Added newly synthesized trend metrics successfully.",
-      },
-    ];
+    const progressTimer = setInterval(() => {
+      setScrapingProgress((prev) => (prev < 92 ? prev + 4 : prev));
+    }, 220);
 
-    logMessages.forEach((msg, index) => {
-      setTimeout(() => {
-        setScraperLogs((prev) => [...prev, msg.m]);
-        setScrapingProgress(
-          Math.floor(((index + 1) / logMessages.length) * 100),
-        );
+    try {
+      const keywords = scrapeConfig.keywords
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
 
-        if (index === logMessages.length - 1) {
-          setIsScraping(false);
+      const res = await fetch("/api/social-trends/scrape", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          keywords,
+          infoTypes: scrapeConfig.infoTypes,
+        }),
+      });
 
-          // Split user's keywords and construct realistic matching indicators
-          const kwList = scrapeConfig.keywords
-            .split(",")
-            .map((s) => s.trim())
-            .filter(Boolean);
+      const data = await res.json();
 
-          const defaultSentiments = ["Positive", "Neutral", "Positive"];
+      if (!res.ok) {
+        throw new Error(data?.error || "Scraper endpoint failed.");
+      }
 
-          const newScrapedTrends = kwList.map((kw, i) => {
-            const capitalized = kw.charAt(0).toUpperCase() + kw.slice(1);
-            const topic = kw.startsWith("#")
-              ? kw
-              : capitalized.replace(/\s+/g, "");
-            const finalTopic = topic.startsWith("#") ? topic : `#${topic}`;
+      const incomingTrends: TrendItem[] = Array.isArray(data?.trends)
+        ? data.trends.map((trend: any, idx: number) => ({
+            id: String(trend.id || `live-${Date.now()}-${idx}`),
+            topic: String(trend.topic || "#UnknownTrend"),
+            volume: String(trend.volume || "0"),
+            change: String(trend.change || "+0%"),
+            sentiment: ["Positive", "Neutral", "Negative"].includes(
+              trend.sentiment,
+            )
+              ? (trend.sentiment as TrendSentiment)
+              : "Neutral",
+            confidenceScore:
+              typeof trend.confidenceScore === "number"
+                ? trend.confidenceScore
+                : undefined,
+            platformInsights: Array.isArray(trend.platformInsights)
+              ? trend.platformInsights
+              : [],
+            relatedHashtags: Array.isArray(trend.relatedHashtags)
+              ? trend.relatedHashtags
+              : [],
+            sampleMentions: Array.isArray(trend.sampleMentions)
+              ? trend.sampleMentions
+              : [],
+          }))
+        : [];
 
-            const randomVol = (
-              Math.floor(Math.random() * 9500) + 1200
-            ).toLocaleString();
-            const randomChange = `+${Math.floor(Math.random() * 115) + 15}%`;
-            const randomSentiment =
-              defaultSentiments[i % defaultSentiments.length];
-
-            return {
-              id: `t-custom-${Date.now()}-${i}`,
-              topic: finalTopic,
-              volume: randomVol,
-              change: randomChange,
-              sentiment: randomSentiment,
-            };
-          });
-
-          setTrends((prev) => {
-            // Put newly scraped trends on top, filter unique by topic
-            const combined = [...newScrapedTrends, ...prev];
-            const unique = combined.filter(
-              (item, index, self) =>
-                self.findIndex(
-                  (t) => t.topic.toLowerCase() === item.topic.toLowerCase(),
-                ) === index,
-            );
-            localStorage.setItem("pulse_trends_list", JSON.stringify(unique));
-            return unique;
-          });
-
-          const timeStr = new Date().toLocaleTimeString([], {
-            hour: "2-digit",
-            minute: "2-digit",
-            second: "2-digit",
-          });
-          const updatedConfig = {
-            ...scrapeConfig,
-            lastRun: `Today at ${timeStr}`,
-          };
-          setScrapeConfig(updatedConfig);
-          localStorage.setItem(
-            "pulse_scraper_config",
-            JSON.stringify(updatedConfig),
+      if (incomingTrends.length > 0) {
+        setTrends((prev) => {
+          const combined = [...incomingTrends, ...prev];
+          const unique = combined.filter(
+            (item, index, self) =>
+              self.findIndex(
+                (t) => t.topic.toLowerCase() === item.topic.toLowerCase(),
+              ) === index,
           );
-        }
-      }, msg.t);
-    });
+          localStorage.setItem("pulse_trends_list", JSON.stringify(unique));
+          return unique;
+        });
+      }
+
+      const apiLogs = Array.isArray(data?.logs)
+        ? data.logs.map((l: unknown) => String(l))
+        : [];
+
+      setScraperLogs((prev) => [
+        ...prev,
+        ...apiLogs,
+        `[SUCCESS] Collected ${incomingTrends.length} trend summary rows.`,
+      ]);
+
+      const timeStr = new Date().toLocaleTimeString([], {
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+      });
+
+      const updatedConfig = {
+        ...scrapeConfig,
+        lastRun: `Today at ${timeStr}`,
+      };
+      setScrapeConfig(updatedConfig);
+      localStorage.setItem(
+        "pulse_scraper_config",
+        JSON.stringify(updatedConfig),
+      );
+    } catch (error: any) {
+      console.error(error);
+      setScraperLogs((prev) => [
+        ...prev,
+        `[ERROR] ${error?.message || "Scraper request failed."}`,
+      ]);
+    } finally {
+      clearInterval(progressTimer);
+      setScrapingProgress(100);
+      setIsScraping(false);
+    }
   };
 
   const handleResetTrends = () => {
-    setTrends(MOCK_TRENDS);
-    localStorage.setItem("pulse_trends_list", JSON.stringify(MOCK_TRENDS));
+    setTrends(MOCK_TRENDS as TrendItem[]);
+    localStorage.setItem(
+      "pulse_trends_list",
+      JSON.stringify(MOCK_TRENDS as TrendItem[]),
+    );
   };
 
   const handleGenerateIdeas = async () => {
@@ -839,51 +897,285 @@ Keep advice highly actionable, strategic, and professional. Format your entire r
             </div>
 
             <div className="space-y-4 max-h-[460px] overflow-y-auto pr-1">
-              {trends.map((trend) => (
-                <div
-                  key={trend.id}
-                  className="flex items-center justify-between p-4 border border-slate-100 rounded-lg hover:border-slate-200 transition-colors"
-                >
-                  <div className="flex flex-col">
-                    <span className="font-bold text-slate-800 text-base">
-                      {trend.topic}
-                    </span>
-                    <span className="text-xs font-medium text-slate-500 mt-1 flex items-center gap-1">
-                      Volume:{" "}
-                      <span className="text-slate-700 font-semibold">
-                        {trend.volume} mentions
-                      </span>
-                    </span>
-                  </div>
-                  <div className="flex items-center gap-6">
-                    <div className="flex flex-col items-end">
-                      <span className="text-[10px] uppercase font-bold text-slate-400 tracking-widest mb-1">
-                        Sentiment
-                      </span>
-                      <span
-                        className={`text-xs font-bold px-2.5 py-1 rounded-full ${
-                          trend.sentiment === "Positive"
-                            ? "bg-emerald-100 text-emerald-700"
-                            : trend.sentiment === "Negative"
-                              ? "bg-rose-100 text-rose-700"
-                              : "bg-slate-100 text-slate-600"
-                        }`}
-                      >
-                        {trend.sentiment}
-                      </span>
+              {trends.map((trend) => {
+                const totals = (trend.platformInsights || []).reduce(
+                  (acc, item) => {
+                    acc.positive += item.positive || 0;
+                    acc.neutral += item.neutral || 0;
+                    acc.negative += item.negative || 0;
+                    return acc;
+                  },
+                  { positive: 0, neutral: 0, negative: 0 },
+                );
+
+                const sum = Math.max(
+                  totals.positive + totals.neutral + totals.negative,
+                  1,
+                );
+
+                const sourcesInMentions = Array.from(
+                  new Set((trend.sampleMentions || []).map((m) => m.source)),
+                );
+
+                const activeSourceFilter =
+                  sourceFilterByTrend[trend.id] || "all";
+
+                const visibleMentions = (trend.sampleMentions || []).filter(
+                  (mention) =>
+                    activeSourceFilter === "all" ||
+                    mention.source === activeSourceFilter,
+                );
+
+                return (
+                  <div
+                    key={trend.id}
+                    className="p-4 border border-slate-100 rounded-lg hover:border-slate-200 transition-colors"
+                  >
+                    <div className="flex items-center justify-between">
+                      <div className="flex flex-col">
+                        <span className="font-bold text-slate-800 text-base">
+                          {trend.topic}
+                        </span>
+                        <span className="text-xs font-medium text-slate-500 mt-1 flex items-center gap-1">
+                          Volume:{" "}
+                          <span className="text-slate-700 font-semibold">
+                            {trend.volume} mentions
+                          </span>
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-4">
+                        <div className="flex flex-col items-end">
+                          <span className="text-[10px] uppercase font-bold text-slate-400 tracking-widest mb-1">
+                            Sentiment
+                          </span>
+                          <span
+                            className={`text-xs font-bold px-2.5 py-1 rounded-full ${
+                              trend.sentiment === "Positive"
+                                ? "bg-emerald-100 text-emerald-700"
+                                : trend.sentiment === "Negative"
+                                  ? "bg-rose-100 text-rose-700"
+                                  : "bg-slate-100 text-slate-600"
+                            }`}
+                          >
+                            {trend.sentiment}
+                          </span>
+                        </div>
+                        <div className="flex flex-col items-end w-16">
+                          <span className="text-[10px] uppercase font-bold text-slate-400 tracking-widest mb-1">
+                            Impact
+                          </span>
+                          <span className="text-sm font-bold text-emerald-600 flex items-center gap-0.5">
+                            {trend.change}{" "}
+                            <ArrowUpRight className="w-3 h-3 text-emerald-500" />
+                          </span>
+                        </div>
+                        <div className="flex flex-col items-end w-20">
+                          <span className="text-[10px] uppercase font-bold text-slate-400 tracking-widest mb-1">
+                            Confidence
+                          </span>
+                          <span className="text-xs font-bold px-2 py-1 rounded-full bg-blue-50 text-blue-700 border border-blue-100">
+                            {typeof trend.confidenceScore === "number"
+                              ? `${trend.confidenceScore}%`
+                              : "n/a"}
+                          </span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setExpandedTrendId((prev) =>
+                              prev === trend.id ? null : trend.id,
+                            )
+                          }
+                          className="text-[10px] font-bold uppercase tracking-wider px-2.5 py-1.5 rounded-md border border-slate-200 text-slate-600 hover:bg-slate-50"
+                        >
+                          {expandedTrendId === trend.id ? (
+                            <span className="flex items-center gap-1">
+                              Hide <ChevronUp className="w-3.5 h-3.5" />
+                            </span>
+                          ) : (
+                            <span className="flex items-center gap-1">
+                              Details <ChevronDown className="w-3.5 h-3.5" />
+                            </span>
+                          )}
+                        </button>
+                      </div>
                     </div>
-                    <div className="flex flex-col items-end w-16">
-                      <span className="text-[10px] uppercase font-bold text-slate-400 tracking-widest mb-1">
-                        Impact
-                      </span>
-                      <span className="text-sm font-bold text-emerald-600 flex items-center gap-0.5">
-                        {trend.change}{" "}
-                        <ArrowUpRight className="w-3 h-3 text-emerald-500" />
-                      </span>
-                    </div>
+
+                    {expandedTrendId === trend.id && (
+                      <div className="mt-4 pt-4 border-t border-slate-100 space-y-4">
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                          <div className="bg-slate-50 border border-slate-150 border-slate-100 rounded-lg p-3">
+                            <p className="text-[10px] uppercase tracking-wider font-black text-slate-500 mb-1">
+                              Most Positive Platform
+                            </p>
+                            <p className="text-sm font-bold text-emerald-700">
+                              {trend.platformInsights?.length
+                                ? `${sourceName(trend.platformInsights[0].source)} (${trend.platformInsights[0].positiveRate}% positive)`
+                                : "No platform data available"}
+                            </p>
+                          </div>
+                          <div className="bg-slate-50 border border-slate-100 rounded-lg p-3">
+                            <p className="text-[10px] uppercase tracking-wider font-black text-slate-500 mb-1">
+                              Lowest Positive Platform
+                            </p>
+                            <p className="text-sm font-bold text-rose-700">
+                              {trend.platformInsights?.length
+                                ? (() => {
+                                    const last =
+                                      trend.platformInsights[
+                                        trend.platformInsights.length - 1
+                                      ];
+                                    return `${sourceName(last.source)} (${last.positiveRate}% positive)`;
+                                  })()
+                                : "No platform data available"}
+                            </p>
+                          </div>
+                        </div>
+
+                        <div>
+                          <p className="text-[10px] uppercase tracking-wider font-black text-slate-500 mb-2">
+                            Related Hashtags & Trends
+                          </p>
+                          <div className="flex flex-wrap gap-1.5">
+                            {(trend.relatedHashtags || []).length > 0 ? (
+                              trend.relatedHashtags?.map((tag, idx) => (
+                                <span
+                                  key={`${trend.id}-tag-${idx}`}
+                                  className="px-2 py-1 rounded-md bg-emerald-50 text-emerald-700 border border-emerald-100 text-[10px] font-bold"
+                                >
+                                  {tag}
+                                </span>
+                              ))
+                            ) : (
+                              <span className="text-xs text-slate-500">
+                                No additional hashtags extracted yet.
+                              </span>
+                            )}
+                          </div>
+                        </div>
+
+                        <div>
+                          <p className="text-[10px] uppercase tracking-wider font-black text-slate-500 mb-2">
+                            Sentiment Distribution
+                          </p>
+                          <div className="w-full h-2.5 rounded-full overflow-hidden border border-slate-100 bg-slate-100 flex">
+                            <div
+                              className="bg-emerald-500 h-full"
+                              style={{
+                                width: `${Math.round((totals.positive / sum) * 100)}%`,
+                              }}
+                              title={`Positive: ${totals.positive}`}
+                            />
+                            <div
+                              className="bg-slate-400 h-full"
+                              style={{
+                                width: `${Math.round((totals.neutral / sum) * 100)}%`,
+                              }}
+                              title={`Neutral: ${totals.neutral}`}
+                            />
+                            <div
+                              className="bg-rose-500 h-full"
+                              style={{
+                                width: `${Math.round((totals.negative / sum) * 100)}%`,
+                              }}
+                              title={`Negative: ${totals.negative}`}
+                            />
+                          </div>
+                          <div className="mt-2 flex items-center gap-3 text-[10px] font-semibold text-slate-500">
+                            <span className="flex items-center gap-1">
+                              <span className="w-2 h-2 rounded-full bg-emerald-500 inline-block" />
+                              {totals.positive} positive
+                            </span>
+                            <span className="flex items-center gap-1">
+                              <span className="w-2 h-2 rounded-full bg-slate-400 inline-block" />
+                              {totals.neutral} neutral
+                            </span>
+                            <span className="flex items-center gap-1">
+                              <span className="w-2 h-2 rounded-full bg-rose-500 inline-block" />
+                              {totals.negative} negative
+                            </span>
+                          </div>
+                        </div>
+
+                        <div>
+                          <p className="text-[10px] uppercase tracking-wider font-black text-slate-500 mb-2">
+                            Source Posts
+                          </p>
+                          {sourcesInMentions.length > 0 && (
+                            <div className="flex flex-wrap gap-1.5 mb-2.5">
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setSourceFilterByTrend((prev) => ({
+                                    ...prev,
+                                    [trend.id]: "all",
+                                  }))
+                                }
+                                className={`text-[10px] font-bold px-2 py-1 rounded-md border transition-colors ${
+                                  activeSourceFilter === "all"
+                                    ? "bg-emerald-600 text-white border-emerald-600"
+                                    : "bg-white text-slate-600 border-slate-200 hover:bg-slate-50"
+                                }`}
+                              >
+                                All
+                              </button>
+                              {sourcesInMentions.map((source) => (
+                                <button
+                                  key={`${trend.id}-filter-${source}`}
+                                  type="button"
+                                  onClick={() =>
+                                    setSourceFilterByTrend((prev) => ({
+                                      ...prev,
+                                      [trend.id]: source,
+                                    }))
+                                  }
+                                  className={`text-[10px] font-bold px-2 py-1 rounded-md border transition-colors ${
+                                    activeSourceFilter === source
+                                      ? "bg-emerald-600 text-white border-emerald-600"
+                                      : "bg-white text-slate-600 border-slate-200 hover:bg-slate-50"
+                                  }`}
+                                >
+                                  {sourceName(source)}
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                          <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
+                            {visibleMentions.length > 0 ? (
+                              visibleMentions.map((mention, idx) => (
+                                <a
+                                  key={`${trend.id}-source-${idx}`}
+                                  href={mention.url}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="block p-2.5 rounded-md border border-slate-100 hover:border-emerald-200 hover:bg-emerald-50/50 transition-colors"
+                                >
+                                  <div className="flex items-center justify-between gap-3">
+                                    <span className="text-[10px] font-black uppercase tracking-wider text-slate-500">
+                                      {sourceName(mention.source)}
+                                    </span>
+                                    <span className="text-[10px] font-semibold text-slate-400 flex items-center gap-1">
+                                      Open Post{" "}
+                                      <ExternalLink className="w-3 h-3" />
+                                    </span>
+                                  </div>
+                                  <p className="text-xs font-semibold text-slate-700 mt-1 line-clamp-2">
+                                    {mention.title}
+                                  </p>
+                                </a>
+                              ))
+                            ) : (
+                              <span className="text-xs text-slate-500">
+                                No source links available for this filter.
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    )}
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           </div>
           <div className="mt-4 text-[10px] text-slate-400 border-t pt-3 flex items-center gap-1.5 font-mono">
