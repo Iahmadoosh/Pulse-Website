@@ -5,6 +5,7 @@ import { GoogleGenAI, Type } from "@google/genai";
 import dotenv from "dotenv";
 import cron from "node-cron";
 import axios from "axios";
+import { registerSpyMarketRoutes } from "./server/spyMarketData";
 
 dotenv.config();
 
@@ -613,6 +614,9 @@ async function startServer() {
     }
   });
 
+  // --- SPY OPTIONS TRAINER MARKET DATA ---
+  registerSpyMarketRoutes(app);
+
   app.get("/api/trends", (req, res) => {
     // Allows your frontend to fetch the data the scraper gathered
     res.json(scrapedTrendsDB);
@@ -974,9 +978,17 @@ async function startServer() {
       server: { middlewareMode: true },
       appType: "spa",
     });
+    // The SPY Options Trainer is a separate page at /options.
+    app.get("/options", (req, _res, next) => {
+      req.url = "/options.html";
+      next();
+    });
     app.use(vite.middlewares);
   } else {
     const distPath = path.join(process.cwd(), "dist");
+    app.get("/options", (req, res) => {
+      res.sendFile(path.join(distPath, "options.html"));
+    });
     app.use(express.static(distPath));
     app.get("*", (req, res) => {
       res.sendFile(path.join(distPath, "index.html"));
